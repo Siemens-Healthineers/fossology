@@ -27,6 +27,7 @@
 #include "libfossagent.h"
 #include "sqlCopy.h"
 #include "fossconfig.h"
+#include "libfossunicode.h"
 
 #define PERM_NONE 0         ///< User has no permission (not logged in)
 #define PERM_READ 1         ///< Read-only permission

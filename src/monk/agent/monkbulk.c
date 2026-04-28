@@ -15,6 +15,7 @@
 #include "match.h"
 #include "common.h"
 #include "monk.h"
+#include "scheduler.h"
 
 int bulk_onAllMatches(MonkState* state, const File* file, const GArray* matches);
 
@@ -364,6 +365,16 @@ int bulk_onAllMatches(MonkState* state, const File* file, const GArray* matches)
     );
 
     if (licenseDecisionIds) {
+      /* Read file once for converting byte offsets to UChar16 offsets */
+      size_t fileSize = 0;
+      unsigned char* fileContent = readFileBytes(file->fileName, &fileSize);
+      int isAscii = (fileContent && fileSize > 0) ? fo_utf8FileIsAscii(fileContent, fileSize) : 0;
+      FoUtf16OffsetTable* offsetTable = NULL;
+      if (fileContent && fileSize > 0 && !isAscii)
+      {
+        offsetTable = fo_utf16OffsetTable_build(fileContent, fileSize);
+      }
+
       for (int i=0; i<PQntuples(licenseDecisionIds);i++) {
         long licenseDecisionEventId = atol(PQgetvalue(licenseDecisionIds,i,0));
 
@@ -375,6 +386,28 @@ int bulk_onAllMatches(MonkState* state, const File* file, const GArray* matches)
 
           DiffPoint* highlightTokens = match->ptr.full;
           DiffPoint highlight = getFullHighlightFor(file->tokens, highlightTokens->start, highlightTokens->length);
+
+          if (fileContent && fileSize > 0 && !isAscii)
+          {
+            size_t byteStart = highlight.start;
+            size_t byteEnd   = byteStart + highlight.length;
+            if (byteStart > fileSize) byteStart = fileSize;
+            if (byteEnd   > fileSize) byteEnd   = fileSize;
+
+            size_t charStart, charEnd;
+            if (offsetTable)
+            {
+              charStart = fo_utf16OffsetTable_lookup(offsetTable, byteStart);
+              charEnd   = fo_utf16OffsetTable_lookup(offsetTable, byteEnd);
+            }
+            else
+            {
+              charStart = fo_utf8ByteLenToUChar16Len(fileContent, byteStart);
+              charEnd   = fo_utf8ByteLenToUChar16Len(fileContent, byteEnd);
+            }
+            highlight.start  = charStart;
+            highlight.length = (charEnd >= charStart) ? (charEnd - charStart) : 0;
+          }
 
           PGresult* highlightResult = fo_dbManager_ExecPrepared(
                   fo_dbManager_PrepareStamement(
@@ -392,11 +425,15 @@ int bulk_onAllMatches(MonkState* state, const File* file, const GArray* matches)
           if (highlightResult) {
             PQclear(highlightResult);
           } else {
+            fo_utf16OffsetTable_free(offsetTable);
+            free(fileContent);
             fo_dbManager_rollback(state->dbManager);
             return 0;
           }
         }
       }
+      fo_utf16OffsetTable_free(offsetTable);
+      free(fileContent);
       PQclear(licenseDecisionIds);
     } else {
       fo_dbManager_rollback(state->dbManager);

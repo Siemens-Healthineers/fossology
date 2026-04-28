@@ -152,7 +152,7 @@ bool processUploadId(const OjoState &state, int uploadId,
       }
 
       if (!storeResultInDb(identified, threadLocalDatabaseHandler,
-          state.getAgentId(), pFileId))
+          state.getAgentId(), pFileId, filePath))
       {
         LOG_FATAL("Unable to store results in database for pfile %ld.",
           pFileId);
@@ -172,14 +172,20 @@ bool processUploadId(const OjoState &state, int uploadId,
  * Store the license finding (if found) and highlight to the database.
  *
  * Store not found entries for empty matches to the database.
+ * Byte offsets from regex matching are converted to UChar16 (UTF-16 code unit)
+ * offsets before storage so that positions are consistent with the ICU-based
+ * copyright agent output.
+ *
  * @param matches        List of matches.
  * @param databaseHandle Database handler to be used
  * @param agent_fk       Current agent id
  * @param pfile_fk       Current pfile id
+ * @param filePath       Path to the scanned file (for byte→UTF-16 conversion)
  * @return True on success, false otherwise.
  */
 bool storeResultInDb(const vector<ojomatch> &matches,
-    OjosDatabaseHandler &databaseHandle, const int agent_fk, const int pfile_fk)
+    OjosDatabaseHandler &databaseHandle, const int agent_fk,
+    const int pfile_fk, const char *filePath)
 {
   if (!databaseHandle.begin())
   {
@@ -193,6 +199,24 @@ bool storeResultInDb(const vector<ojomatch> &matches,
     databaseHandle.insertNoResultInDatabase(entry);
     return databaseHandle.commit();
   }
+
+  /* Read file content once for converting byte offsets to UChar16 offsets */
+  size_t fileSize = 0;
+  unsigned char *fileContent = fo_readFileBytes(filePath, &fileSize);
+  int isAscii = (fileContent && fileSize > 0) ? fo_utf8FileIsAscii(fileContent, fileSize) : 0;
+  FoUtf16OffsetTable *offsetTable = NULL;
+  if (fileContent && fileSize > 0 && !isAscii)
+  {
+    offsetTable = fo_utf16OffsetTable_build(fileContent, fileSize);
+  }
+
+  LOG_NOTICE("OJO Unicode conversion: filePath=%s fileSize=%zu fileContent=%s isAscii=%d offsetTable=%s",
+    filePath ? filePath : "(null)",
+    fileSize,
+    fileContent ? "OK" : "NULL",
+    isAscii,
+    offsetTable ? "built" : "none");
+
   for (auto m : matches)
   {
     OjoDatabaseEntry entry(m.license_fk, agent_fk, pfile_fk);
@@ -200,9 +224,48 @@ bool storeResultInDb(const vector<ojomatch> &matches,
     if (entry.license_fk > 0)
     {
       ++count;
+
+      /* Convert byte offsets to UChar16 offsets */
+      if (fileContent && fileSize > 0 && !isAscii)
+      {
+        size_t byteStart = (size_t)m.start;
+        size_t byteEnd   = (size_t)m.end;
+
+        if (byteStart > fileSize) byteStart = fileSize;
+        if (byteEnd   > fileSize) byteEnd   = fileSize;
+
+        size_t charStart, charEnd;
+        if (offsetTable)
+        {
+          charStart = fo_utf16OffsetTable_lookup(offsetTable, byteStart);
+          charEnd   = fo_utf16OffsetTable_lookup(offsetTable, byteEnd);
+        }
+        else
+        {
+          charStart = fo_utf8ByteLenToUChar16Len(fileContent, byteStart);
+          charEnd   = fo_utf8ByteLenToUChar16Len(fileContent, byteEnd);
+        }
+
+        LOG_NOTICE("OJO convert: '%s' byteStart=%zu byteEnd=%zu -> charStart=%zu charEnd=%zu (len %zu->%zu)",
+          m.content.c_str(), byteStart, byteEnd, charStart, charEnd,
+          byteEnd - byteStart, charEnd - charStart);
+
+        m.start = (long int)charStart;
+        m.end   = (long int)charEnd;
+        m.len   = (long int)(charEnd >= charStart ? charEnd - charStart : 0);
+      }
+      else
+      {
+        LOG_NOTICE("OJO no conversion: '%s' start=%ld end=%ld len=%ld (fileContent=%s isAscii=%d)",
+          m.content.c_str(), m.start, m.end, m.len,
+          fileContent ? "OK" : "NULL", isAscii);
+      }
+
       unsigned long int fl_pk = databaseHandle.saveLicenseToDatabase(entry);
       if (!(fl_pk > 0) || !databaseHandle.saveHighlightToDatabase(m, fl_pk))
       {
+        fo_utf16OffsetTable_free(offsetTable);
+        free(fileContent);
         databaseHandle.rollback();
         return false;
       }
@@ -213,6 +276,8 @@ bool storeResultInDb(const vector<ojomatch> &matches,
     }
   }
 
+  fo_utf16OffsetTable_free(offsetTable);
+  free(fileContent);
   return databaseHandle.commit();
 }
 

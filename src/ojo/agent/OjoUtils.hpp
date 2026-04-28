@@ -36,8 +36,8 @@ void bail(int exitval);
 bool processUploadId(const OjoState &state, int uploadId,
   OjosDatabaseHandler &databaseHandler, bool ignoreFilesWithMimeType);
 bool storeResultInDb(const vector<ojomatch> &matches,
-  OjosDatabaseHandler &databaseHandle, const int agent_fk,
-  const int pfile_fk);
+    OjosDatabaseHandler &databaseHandle, const int agent_fk,
+    const int pfile_fk, const char *filePath);
 bool parseCliOptions(int argc, char **argv, OjoCliOptions &dest,
   std::vector<std::string> &fileNames, std::string &directoryToScan);
 void appendToJson(const std::string fileName,

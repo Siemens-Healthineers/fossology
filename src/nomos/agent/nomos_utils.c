@@ -694,6 +694,16 @@ FUNCTION int updateLicenseHighlighting(cacheroot_t *pcroot){
   printf("%s %s %i \n", cur.filePath,cur.compLic , cur.theMatches->len);
 #endif
 
+  /* Read file once for converting byte offsets to UChar16 offsets */
+  size_t fileSize = 0;
+  unsigned char* fileContent = fo_readFileBytes(cur.targetFile, &fileSize);
+  int isAscii = (fileContent && fileSize > 0) ? fo_utf8FileIsAscii(fileContent, fileSize) : 0;
+  FoUtf16OffsetTable* offsetTable = NULL;
+  if (fileContent && fileSize > 0 && !isAscii)
+  {
+    offsetTable = fo_utf16OffsetTable_build(fileContent, fileSize);
+  }
+
   // This speeds up the writing to the database and ensures that we have either full highlight information or none
   PGresult* begin1 = PQexec(gl.pgConn, "BEGIN");
   PQclear(begin1);
@@ -711,12 +721,37 @@ FUNCTION int updateLicenseHighlighting(cacheroot_t *pcroot){
   for (i = 0; i < cur.keywordPositions->len; ++i)
   {
     MatchPositionAndType* ourMatchv = getMatchfromHighlightInfo(cur.keywordPositions, i);
+    int hlStart = ourMatchv->start;
+    int hlLen   = ourMatchv->end - ourMatchv->start;
+
+    if (fileContent && fileSize > 0 && !isAscii)
+    {
+      size_t byteStart = (size_t)ourMatchv->start;
+      size_t byteEnd   = (size_t)ourMatchv->end;
+      if (byteStart > fileSize) byteStart = fileSize;
+      if (byteEnd   > fileSize) byteEnd   = fileSize;
+
+      size_t charStart, charEnd;
+      if (offsetTable)
+      {
+        charStart = fo_utf16OffsetTable_lookup(offsetTable, byteStart);
+        charEnd   = fo_utf16OffsetTable_lookup(offsetTable, byteEnd);
+      }
+      else
+      {
+        charStart = fo_utf8ByteLenToUChar16Len(fileContent, byteStart);
+        charEnd   = fo_utf8ByteLenToUChar16Len(fileContent, byteEnd);
+      }
+      hlStart = (int)charStart;
+      hlLen   = (int)(charEnd >= charStart ? charEnd - charStart : 0);
+    }
+
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
     // If uninitialized, the loop will not start
     result = fo_dbManager_ExecPrepared(
                 preparedKeywords,
-                cur.pFileFk, ourMatchv->start, ourMatchv->end - ourMatchv->start);
+                cur.pFileFk, hlStart, hlLen);
 #pragma GCC diagnostic pop
     if (result)
     {
@@ -751,17 +786,45 @@ FUNCTION int updateLicenseHighlighting(cacheroot_t *pcroot){
         //! the license File ID was never set and we should not insert it in the database
         continue;
       }
+
+      int hlStart = ourMatchv->start;
+      int hlLen   = ourMatchv->end - ourMatchv->start;
+
+      if (fileContent && fileSize > 0 && !isAscii)
+      {
+        size_t byteStart = (size_t)ourMatchv->start;
+        size_t byteEnd   = (size_t)ourMatchv->end;
+        if (byteStart > fileSize) byteStart = fileSize;
+        if (byteEnd   > fileSize) byteEnd   = fileSize;
+
+        size_t charStart, charEnd;
+        if (offsetTable)
+        {
+          charStart = fo_utf16OffsetTable_lookup(offsetTable, byteStart);
+          charEnd   = fo_utf16OffsetTable_lookup(offsetTable, byteEnd);
+        }
+        else
+        {
+          charStart = fo_utf8ByteLenToUChar16Len(fileContent, byteStart);
+          charEnd   = fo_utf8ByteLenToUChar16Len(fileContent, byteEnd);
+        }
+        hlStart = (int)charStart;
+        hlLen   = (int)(charEnd >= charStart ? charEnd - charStart : 0);
+      }
+
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
       // If uninitialized, the loop will not start
       result = fo_dbManager_ExecPrepared(
                   preparedLicenses,
         ourLicence->licenseFileId,
-        ourMatchv->start, ourMatchv->end - ourMatchv->start
+        hlStart, hlLen
       );
 #pragma GCC diagnostic pop
       if (result == NULL)
       {
+        fo_utf16OffsetTable_free(offsetTable);
+        free(fileContent);
         return (FALSE);
       } else {
         PQclear(result);
@@ -769,6 +832,8 @@ FUNCTION int updateLicenseHighlighting(cacheroot_t *pcroot){
     }
   }
 
+  fo_utf16OffsetTable_free(offsetTable);
+  free(fileContent);
   PGresult* commit2 = PQexec(gl.pgConn, "COMMIT");
   PQclear(commit2);
   return (TRUE);
